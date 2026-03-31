@@ -1,0 +1,12 @@
+{
+  "name": "tro-platform",
+  "version": "1.0.0",
+  "description": "The Real Orbit - Global Reward Platform",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
