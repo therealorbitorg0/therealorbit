@@ -1,695 +1,112 @@
 #!/usr/bin/env node
-// ================================================
-// TRO LOCAL DEV SERVER
-// Single file — serves frontend + mock API + DB
-// Run: node server.js
-// Then open: http://localhost:3000
-// ================================================
-
 const http = require('http');
-const fs = require('fs');
-const path = require('path');
 const url = require('url');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { Client } = require('pg');
 
-const PORT = 3000;
-const DATA_FILE = path.join(__dirname, '.tro-data.json');
+const PORT = process.env.PORT || 3000;
+const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:Anwar@#$321@db.bvejwsxuakshavinqqpr.supabase.co:5432/postgres';
+const JWT_SECRET = process.env.JWT_SECRET || 'tro-secret-2024';
 
-// ================================================
-// IN-MEMORY DATABASE (persisted to .tro-data.json)
-// ================================================
-let DB = {
-  users: [],
-  admins: [{ id: 1, name: 'Admin', email: 'admin@gmail.com', password: hashPwd('admin123'), status: 1 }],
-  kyc: [],
-  wallets: [],
-  investments: [],
-  transactions: [],
-  withdrawals: [],
-  incomes: [],
-  settings: {
-    entry_amount: '167',
-    wallet_address: 'TRXxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    referral_percent: '15',
-    pension_amount: '100',
-    fast_income_bonus: '100',
-    fast_income_requirement: '4',
-    group_size: '10000',
-    min_monthly_referrals: '2',
-    withdrawal_fee: '2',
-    min_withdrawal: '10',
-    site_name: 'The Real Orbit',
-    announcement: '',
-    announcement_active: '0',
-  },
-  groups: [
-    { id: 1, name: 'Group A', status: 1, member_count: 247 },
-    { id: 2, name: 'Group B', status: 0, member_count: 0 },
-  ],
-  banners: [],
-  nextId: { users: 2, kyc: 1, tx: 1, inv: 1, wd: 1 },
-};
+const db = new Client({ connectionString: DB_URL, ssl: { rejectUnauthorized: false } });
+db.connect().then(() => { console.log('✅ Supabase connected!'); initDB(); }).catch(e => console.error('❌ DB:', e.message));
 
-// Load persisted data
-if (fs.existsSync(DATA_FILE)) {
-  try { DB = { ...DB, ...JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) }; } catch(e) {}
+async function initDB() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, email VARCHAR(255) UNIQUE NOT NULL, mobile VARCHAR(50), country_code VARCHAR(10) DEFAULT '+91', password VARCHAR(255) NOT NULL, user_id VARCHAR(50) UNIQUE, sponsor_id VARCHAR(50), kyc_status VARCHAR(50) DEFAULT 'not_submitted', active_status INT DEFAULT 0, status INT DEFAULT 1, eth_address VARCHAR(255) DEFAULT '', created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS admins (id SERIAL PRIMARY KEY, name VARCHAR(255), email VARCHAR(255) UNIQUE, password VARCHAR(255), status INT DEFAULT 1);
+    CREATE TABLE IF NOT EXISTS wallets (id SERIAL PRIMARY KEY, user_id INT UNIQUE REFERENCES users(id), main_wallet DECIMAL(15,2) DEFAULT 0, fund_wallet DECIMAL(15,2) DEFAULT 0, created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS incomes (id SERIAL PRIMARY KEY, user_id INT UNIQUE REFERENCES users(id), direct_income DECIMAL(15,2) DEFAULT 0, pension_income DECIMAL(15,2) DEFAULT 0, created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS kyc (id SERIAL PRIMARY KEY, user_id INT UNIQUE REFERENCES users(id), status VARCHAR(50) DEFAULT 'pending', rejection_reason TEXT, created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS investments (id SERIAL PRIMARY KEY, user_id INT REFERENCES users(id), amount DECIMAL(15,2), tx_hash VARCHAR(255) UNIQUE, status INT DEFAULT 0, created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id INT REFERENCES users(id), tx_type VARCHAR(100), type VARCHAR(50), amount DECIMAL(15,2), tx_id VARCHAR(255), status VARCHAR(50), remarks TEXT, created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS withdrawals (id SERIAL PRIMARY KEY, user_id INT REFERENCES users(id), amount DECIMAL(15,2), tx_charge DECIMAL(15,2), payable DECIMAL(15,2), wallet_address VARCHAR(255), status VARCHAR(50) DEFAULT 'pending', remarks TEXT, created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS settings (key VARCHAR(255) PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS groups (id SERIAL PRIMARY KEY, name VARCHAR(255), status INT DEFAULT 1, member_count INT DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS banners (id SERIAL PRIMARY KEY, title VARCHAR(255), image_url TEXT, active INT DEFAULT 1, created_at TIMESTAMP DEFAULT NOW());
+  `);
+  const adminExists = await db.query('SELECT id FROM admins WHERE email=$1', ['admin@gmail.com']);
+  if (!adminExists.rows.length) await db.query('INSERT INTO admins (name,email,password) VALUES ($1,$2,$3)', ['Admin','admin@gmail.com',hashPwd('admin123')]);
+  const defaults = {entry_amount:'167',wallet_address:'TRXxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',referral_percent:'15',pension_amount:'100',fast_income_bonus:'100',fast_income_requirement:'4',group_size:'10000',min_monthly_referrals:'2',withdrawal_fee:'2',min_withdrawal:'10',site_name:'The Real Orbit',announcement:'',announcement_active:'0'};
+  for (const [k,v] of Object.entries(defaults)) await db.query('INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING',[k,v]);
+  const grp = await db.query('SELECT id FROM groups LIMIT 1');
+  if (!grp.rows.length) await db.query("INSERT INTO groups (name,status,member_count) VALUES ('Group A',1,247),('Group B',0,0)");
+  console.log('✅ DB ready!');
 }
 
-function saveDB() {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(DB, null, 2));
-}
+function hashPwd(p) { return crypto.createHash('sha256').update(p+'tro_salt').digest('hex'); }
+function genUID() { return 'TRO'+Math.random().toString(36).substring(2,10).toUpperCase(); }
+function genToken(p) { const d=Buffer.from(JSON.stringify({...p,exp:Date.now()+7*24*60*60*1000})).toString('base64'); return d+'.'+crypto.createHmac('sha256',JWT_SECRET).update(d).digest('hex'); }
+function verifyToken(t) { if(!t) return null; try { const [d,s]=t.split('.'); if(s!==crypto.createHmac('sha256',JWT_SECRET).update(d).digest('hex')) return null; const p=JSON.parse(Buffer.from(d,'base64').toString()); return p.exp<Date.now()?null:p; } catch{return null;} }
+function getToken(req) { return (req.headers['authorization']||'').replace('Bearer ','').trim()||null; }
+async function getUser(req) { const p=verifyToken(getToken(req)); if(!p) return null; return (await db.query('SELECT * FROM users WHERE id=$1',[p.userId])).rows[0]||null; }
+async function getAdmin(req) { const p=verifyToken(getToken(req)); if(!p||!p.isAdmin) return null; return (await db.query('SELECT * FROM admins WHERE id=$1',[p.userId])).rows[0]||null; }
+async function getSettings() { const r=await db.query('SELECT key,value FROM settings'); return Object.fromEntries(r.rows.map(r=>[r.key,r.value])); }
+function strip(u) { if(!u) return null; const x={...u}; delete x.password; return x; }
+function paginate(data,total,page,pp) { return {data,total,per_page:pp,current_page:page,last_page:Math.max(1,Math.ceil(total/pp))}; }
+const MIME={'.html':'text/html','.css':'text/css','.js':'application/javascript','.json':'application/json','.png':'image/png','.jpg':'image/jpeg','.ico':'image/x-icon','.svg':'image/svg+xml','.woff2':'font/woff2'};
 
-// ================================================
-// HELPERS
-// ================================================
-function hashPwd(pwd) {
-  return crypto.createHash('sha256').update(pwd + 'tro_salt').digest('hex');
-}
-
-function genId(type) {
-  const id = DB.nextId[type] || 1;
-  DB.nextId[type] = id + 1;
-  saveDB();
-  return id;
-}
-
-function genUserId() {
-  return 'TRO' + Math.random().toString(36).substring(2, 10).toUpperCase();
-}
-
-function generateToken(payload) {
-  const data = Buffer.from(JSON.stringify({ ...payload, exp: Date.now() + 7*24*60*60*1000 })).toString('base64');
-  const sig = crypto.createHmac('sha256', 'tro-local-secret').update(data).digest('hex');
-  return data + '.' + sig;
-}
-
-function verifyToken(token) {
-  if (!token) return null;
-  try {
-    const [data, sig] = token.split('.');
-    const expected = crypto.createHmac('sha256', 'tro-local-secret').update(data).digest('hex');
-    if (sig !== expected) return null;
-    const payload = JSON.parse(Buffer.from(data, 'base64').toString());
-    if (payload.exp < Date.now()) return null;
-    return payload;
-  } catch { return null; }
-}
-
-function getToken(req) {
-  const auth = req.headers['authorization'] || '';
-  return auth.replace('Bearer ', '').trim() || null;
-}
-
-function getUser(req) {
-  const payload = verifyToken(getToken(req));
-  return payload ? DB.users.find(u => u.id === payload.userId) : null;
-}
-
-function getAdmin(req) {
-  const payload = verifyToken(getToken(req));
-  if (!payload || !payload.isAdmin) return null;
-  return DB.admins.find(a => a.id === payload.userId);
-}
-
-function now() { return new Date().toISOString(); }
-function strip(user) { if (!user) return null; const u = {...user}; delete u.password; return u; }
-
-function paginate(arr, page = 1, perPage = 15) {
-  const total = arr.length;
-  const start = (page - 1) * perPage;
-  return {
-    data: arr.slice(start, start + perPage),
-    total, per_page: perPage, current_page: page,
-    last_page: Math.max(1, Math.ceil(total / perPage)),
-  };
-}
-
-// ================================================
-// MIME TYPES
-// ================================================
-const MIME = {
-  '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript',
-  '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg',
-  '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.woff2': 'font/woff2',
-};
-
-// ================================================
-// MOCK API HANDLERS
-// ================================================
-const API = {
-
-  // AUTH
-  'POST /auth/register': (body) => {
-    if (!body.name || !body.email || !body.password) return [400, { message: 'All fields required' }];
-    if (DB.users.find(u => u.email === body.email.toLowerCase())) return [400, { message: 'Email already registered' }];
-    
-    const id = genId('users');
-    const userId = genUserId();
-    const user = {
-      id, name: body.name, email: body.email.toLowerCase(),
-      mobile: body.mobile || '', country_code: body.country_code || '+91',
-      password: hashPwd(body.password), user_id: userId,
-      sponsor_id: body.sponsor_id || null, kyc_status: 'not_submitted',
-      active_status: 0, status: 1, eth_address: '', created_at: now(),
-    };
-    DB.users.push(user);
-    DB.wallets.push({ id: id, user_id: id, main_wallet: 0, fund_wallet: 0, created_at: now() });
-    DB.incomes.push({ id: id, user_id: id, direct_income: 0, pension_income: 0, created_at: now() });
-    saveDB();
-    const token = generateToken({ userId: id, email: user.email });
-    return [200, { token, user: strip(user) }];
-  },
-
-  'POST /auth/login': (body) => {
-    const user = DB.users.find(u => u.email === (body.email || '').toLowerCase());
-    if (!user || user.password !== hashPwd(body.password)) return [401, { message: 'Invalid email or password' }];
-    if (user.status !== 1) return [403, { message: 'Account blocked' }];
-    const kyc = DB.kyc.find(k => k.user_id === user.id);
-    const fullUser = { ...user, kyc_status: kyc?.status || 'not_submitted' };
-    delete fullUser.password;
-    const token = generateToken({ userId: user.id, email: user.email });
-    return [200, { token, user: fullUser }];
-  },
-
-  'POST /auth/logout': () => [200, { message: 'Logged out' }],
-
-  'GET /auth/profile': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    const kyc = DB.kyc.find(k => k.user_id === user.id);
-    return [200, { user: { ...strip(user), kyc_status: kyc?.status || 'not_submitted' } }];
-  },
-
-  'PUT /auth/profile': (body, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    Object.assign(user, { name: body.name || user.name, mobile: body.mobile || user.mobile, eth_address: body.eth_address || user.eth_address });
-    saveDB();
-    return [200, { user: strip(user) }];
-  },
-
-  'POST /auth/change-password': (body, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    if (user.password !== hashPwd(body.current_password)) return [400, { message: 'Current password incorrect' }];
-    user.password = hashPwd(body.password);
-    saveDB();
-    return [200, { message: 'Password updated' }];
-  },
-
-  'POST /auth/forgot-password': (body) => {
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    console.log(`\n📧 OTP for ${body.email}: ${otp}\n`);
-    return [200, { message: 'OTP sent to email', debug_otp: otp }];
-  },
-
-  'POST /auth/verify-otp': () => [200, { message: 'OTP verified', verified: true }],
-
-  // KYC
-  'GET /kyc/status': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    const kyc = DB.kyc.find(k => k.user_id === user.id);
-    return [200, { status: kyc?.status || null, rejection_reason: kyc?.rejection_reason || null }];
-  },
-
-  'GET /kyc/documents': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    return [200, { documents: DB.kyc.find(k => k.user_id === user.id) || null }];
-  },
-
-  // DASHBOARD
-  'GET /dashboard/stats': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    const wallet = DB.wallets.find(w => w.user_id === user.id) || { main_wallet: 0, fund_wallet: 0 };
-    const income = DB.incomes.find(i => i.user_id === user.id) || { direct_income: 0, pension_income: 0 };
-    const directs = DB.users.filter(u => u.sponsor_id === (user.user_id || String(user.id)));
-    const thisMonth = new Date().getMonth();
-    const thisYear = new Date().getFullYear();
-    const monthDirects = directs.filter(u => {
-      const d = new Date(u.created_at);
-      return d.getMonth() === thisMonth && d.getFullYear() === thisYear;
-    }).length;
-    return [200, {
-      wallet, incomes: income,
-      total_directs: directs.length, monthly_directs: monthDirects,
-      fast_income_count: monthDirects,
-      group: { name: 'Group A', current_members: 247 },
-      user: { id: user.id, name: user.name, email: user.email, user_id: user.user_id },
-    }];
-  },
-
-  'GET /dashboard/team': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    const directs = DB.users.filter(u => u.sponsor_id === (user.user_id || String(user.id)));
-    const team = directs.map(u => {
-      const kyc = DB.kyc.find(k => k.user_id === u.id);
-      return { ...strip(u), kyc_status: kyc?.status || 'not_submitted' };
-    });
-    return [200, { team }];
-  },
-
-  'GET /dashboard/transactions': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    const txs = DB.transactions.filter(t => t.user_id === user.id).reverse();
-    const page = 1;
-    return [200, paginate(txs, page, 15)];
-  },
-
-  'GET /dashboard/incomes': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    return [200, { incomes: DB.incomes.find(i => i.user_id === user.id) || {} }];
-  },
-
-  'GET /dashboard/pension': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    const thisMonth = new Date().getMonth();
-    const thisYear = new Date().getFullYear();
-    const monthDirects = DB.users.filter(u => {
-      if (u.sponsor_id !== (user.user_id || String(user.id))) return false;
-      const d = new Date(u.created_at);
-      return d.getMonth() === thisMonth && d.getFullYear() === thisYear;
-    }).length;
-    return [200, { monthly_directs: monthDirects, group_complete: false, eligible: monthDirects >= 2 }];
-  },
-
-  'GET /dashboard/group': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    return [200, { group: { name: 'Group A', current_members: 247, status: 1 } }];
-  },
-
-  // INVESTMENT
-  'GET /investment/plan': () => [200, DB.settings],
-
-  'POST /investment/activate': (body, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    if (!body.tx_hash || body.tx_hash.length < 10) return [400, { message: 'Invalid transaction hash' }];
-    if (DB.investments.find(i => i.tx_hash === body.tx_hash)) return [400, { message: 'Transaction hash already used' }];
-    const inv = { id: genId('inv'), user_id: user.id, amount: 167, tx_hash: body.tx_hash, status: 0, created_at: now() };
-    DB.investments.push(inv);
-    DB.transactions.push({ id: genId('tx'), user_id: user.id, tx_type: 'deposit', type: 'debit', amount: 167, tx_id: body.tx_hash, status: 'pending', remarks: 'Investment deposit', created_at: now() });
-    saveDB();
-    return [200, { message: 'Investment submitted. Pending admin verification.', investment_id: inv.id }];
-  },
-
-  'GET /investment/history': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    return [200, DB.investments.filter(i => i.user_id === user.id)];
-  },
-
-  // WITHDRAWAL
-  'GET /wallet/balance': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    return [200, DB.wallets.find(w => w.user_id === user.id) || { main_wallet: 0, fund_wallet: 0 }];
-  },
-
-  'GET /withdrawal/history': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    return [200, DB.withdrawals.filter(w => w.user_id === user.id).reverse()];
-  },
-
-  'POST /withdrawal/request': (body, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    const amount = parseFloat(body.amount);
-    if (!amount || amount < 10) return [400, { message: 'Minimum withdrawal is $10 USDT' }];
-    const wallet = DB.wallets.find(w => w.user_id === user.id);
-    if (!wallet || wallet.main_wallet < amount) return [400, { message: 'Insufficient balance' }];
-    const fee = amount * 0.02;
-    const payable = amount - fee;
-    wallet.main_wallet -= amount;
-    const wd = { id: genId('wd'), user_id: user.id, amount, tx_charge: fee, payable, wallet_address: body.wallet_address, status: 'pending', created_at: now() };
-    DB.withdrawals.push(wd);
-    DB.transactions.push({ id: genId('tx'), user_id: user.id, tx_type: 'withdrawal', type: 'debit', amount, status: 'pending', remarks: 'Withdrawal request', created_at: now() });
-    saveDB();
-    return [200, { message: 'Withdrawal request submitted' }];
-  },
-
-  // REFERRAL
-  'GET /referral/directs': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    return [200, { directs: DB.users.filter(u => u.sponsor_id === (user.user_id || String(user.id))) }];
-  },
-
-  'GET /referral/fast-income': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    const month = new Date().getMonth();
-    const year = new Date().getFullYear();
-    const count = DB.users.filter(u => {
-      if (u.sponsor_id !== (user.user_id || String(user.id))) return false;
-      const d = new Date(u.created_at);
-      return d.getMonth() === month && d.getFullYear() === year;
-    }).length;
-    return [200, { count, eligible: count >= 4, needed: 4 }];
-  },
-
-  'POST /referral/claim': (_, req) => {
-    const user = getUser(req);
-    if (!user) return [401, { message: 'Unauthorized' }];
-    const income = DB.incomes.find(i => i.user_id === user.id);
-    if (!income || income.direct_income <= 0) return [400, { message: 'No income available to claim' }];
-    const amount = income.direct_income;
-    const wallet = DB.wallets.find(w => w.user_id === user.id);
-    if (wallet) wallet.main_wallet += amount;
-    income.direct_income = 0;
-    DB.transactions.push({ id: genId('tx'), user_id: user.id, tx_type: 'referral_claim', type: 'credit', amount, status: 'completed', remarks: 'Referral income claim', created_at: now() });
-    saveDB();
-    return [200, { message: 'Income claimed!', amount }];
-  },
-
-  // ADMIN LOGIN
-  'POST /admin/login': (body) => {
-    const admin = DB.admins.find(a => a.email === (body.email || '').toLowerCase());
-    if (!admin || admin.password !== hashPwd(body.password)) return [401, { message: 'Invalid credentials' }];
-    const token = generateToken({ userId: admin.id, email: admin.email, isAdmin: true });
-    return [200, { token, admin: strip(admin) }];
-  },
-
-  // ADMIN DASHBOARD
-  'GET /admin/dashboard': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    const today = new Date().toDateString();
-    return [200, {
-      total_users: DB.users.length,
-      active_users: DB.investments.filter(i => i.status === 1).length,
-      new_users_today: DB.users.filter(u => new Date(u.created_at).toDateString() === today).length,
-      pending_kyc: DB.kyc.filter(k => k.status === 'pending').length,
-      pending_withdrawals: DB.withdrawals.filter(w => w.status === 'pending').length,
-      total_invested: DB.investments.filter(i => i.status === 1).reduce((s, i) => s + i.amount, 0),
-      total_pension_paid: DB.transactions.filter(t => t.tx_type === 'pension').reduce((s, t) => s + t.amount, 0),
-      recent_users: DB.users.slice(-8).reverse().map(u => { const k = DB.kyc.find(k => k.user_id === u.id); return { ...strip(u), kyc_status: k?.status || 'none' }; }),
-      recent_transactions: DB.transactions.slice(-6).reverse().map(t => ({ ...t, user: DB.users.find(u => u.id === t.user_id) })),
-    }];
-  },
-
-  'GET /admin/users': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    const search = (new URLSearchParams(_.split('?')[1] || '')).get('search') || '';
-    const page = parseInt((new URLSearchParams(_.split('?')[1] || '')).get('page') || '1');
-    let users = DB.users.map(u => {
-      const k = DB.kyc.find(k => k.user_id === u.id);
-      return { ...strip(u), kyc_status: k?.status || 'none' };
-    });
-    if (search) users = users.filter(u => u.name?.includes(search) || u.email?.includes(search) || u.user_id?.includes(search));
-    users.reverse();
-    return [200, paginate(users, page, 20)];
-  },
-
-  'GET /admin/kyc': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    const status = (new URLSearchParams(_.split('?')[1] || '')).get('status') || 'pending';
-    const list = DB.kyc.filter(k => k.status === status).map(k => ({ ...k, user: DB.users.find(u => u.id === k.user_id) }));
-    return [200, list];
-  },
-
-  'GET /admin/withdrawals': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    const status = (new URLSearchParams(_.split('?')[1] || '')).get('status') || 'pending';
-    const list = DB.withdrawals.filter(w => w.status === status).map(w => ({ ...w, user: DB.users.find(u => u.id === w.user_id) }));
-    return [200, list.reverse()];
-  },
-
-  'GET /admin/transactions': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    const page = parseInt((new URLSearchParams(_.split('?')[1] || '')).get('page') || '1');
-    const txs = DB.transactions.map(t => ({ ...t, user: DB.users.find(u => u.id === t.user_id) })).reverse();
-    return [200, paginate(txs, page, 20)];
-  },
-
-  'GET /admin/plan': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    return [200, DB.settings];
-  },
-
-  'PUT /admin/plan': (body, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    Object.assign(DB.settings, body);
-    saveDB();
-    return [200, { message: 'Plan settings updated' }];
-  },
-
-  'GET /admin/settings': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    return [200, DB.settings];
-  },
-
-  'PUT /admin/settings': (body, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    Object.assign(DB.settings, body);
-    saveDB();
-    return [200, { message: 'Settings saved' }];
-  },
-
-  'GET /admin/groups': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    return [200, DB.groups];
-  },
-
-  'GET /admin/banners': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    return [200, DB.banners];
-  },
-
-  'POST /admin/pension/distribute': (_, req) => {
-    if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-    const pensionAmount = parseFloat(DB.settings.pension_amount || 100);
-    const minRef = parseInt(DB.settings.min_monthly_referrals || 2);
-    const month = new Date().getMonth();
-    const year = new Date().getFullYear();
-    let count = 0;
-    DB.users.forEach(user => {
-      const monthDirects = DB.users.filter(u => {
-        if (u.sponsor_id !== (user.user_id || String(user.id))) return false;
-        const d = new Date(u.created_at);
-        return d.getMonth() === month && d.getFullYear() === year;
-      }).length;
-      if (monthDirects >= minRef) {
-        const wallet = DB.wallets.find(w => w.user_id === user.id);
-        const income = DB.incomes.find(i => i.user_id === user.id);
-        if (wallet) wallet.main_wallet += pensionAmount;
-        if (income) income.pension_income += pensionAmount;
-        DB.transactions.push({ id: genId('tx'), user_id: user.id, tx_type: 'pension', type: 'credit', amount: pensionAmount, status: 'completed', remarks: 'Monthly pension', created_at: now() });
-        count++;
-      }
-    });
-    saveDB();
-    return [200, { message: `Pension distributed to ${count} users`, count }];
-  },
-};
-
-// Dynamic admin routes
-function handleDynamicAdmin(method, pathStr, body, req) {
-  if (!getAdmin(req)) return [401, { message: 'Unauthorized' }];
-
-  // /admin/users/:id
-  let m;
-  if (m = pathStr.match(/^\/admin\/users\/(\d+)$/)) {
-    const uid = parseInt(m[1]);
-    const user = DB.users.find(u => u.id === uid);
-    if (!user) return [404, { message: 'User not found' }];
-    if (method === 'GET') { return [200, strip(user)]; }
-    if (method === 'PUT') { Object.assign(user, { name: body.name, mobile: body.mobile, status: body.status }); saveDB(); return [200, { message: 'User updated' }]; }
-  }
-
-  // /admin/users/:id/block
-  if (m = pathStr.match(/^\/admin\/users\/(\d+)\/block$/)) {
-    const uid = parseInt(m[1]);
-    const user = DB.users.find(u => u.id === uid);
-    if (!user) return [404, { message: 'Not found' }];
-    user.status = user.status === 1 ? 0 : 1;
-    saveDB();
-    return [200, { message: 'Status updated', status: user.status }];
-  }
-
-  // /admin/kyc/:id/approve
-  if (m = pathStr.match(/^\/admin\/kyc\/(\d+)\/approve$/)) {
-    const uid = parseInt(m[1]);
-    const kyc = DB.kyc.find(k => k.user_id === uid);
-    const user = DB.users.find(u => u.id === uid);
-    if (kyc) kyc.status = 'approved';
-    if (user) { user.kyc_status = 'approved'; user.active_status = 1; }
-    saveDB();
-    return [200, { message: 'KYC approved' }];
-  }
-
-  // /admin/kyc/:id/reject
-  if (m = pathStr.match(/^\/admin\/kyc\/(\d+)\/reject$/)) {
-    const uid = parseInt(m[1]);
-    const kyc = DB.kyc.find(k => k.user_id === uid);
-    if (kyc) { kyc.status = 'rejected'; kyc.rejection_reason = body.reason || ''; }
-    saveDB();
-    return [200, { message: 'KYC rejected' }];
-  }
-
-  // /admin/withdrawals/:id/approve
-  if (m = pathStr.match(/^\/admin\/withdrawals\/(\d+)\/approve$/)) {
-    const wid = parseInt(m[1]);
-    const wd = DB.withdrawals.find(w => w.id === wid);
-    if (wd) wd.status = 'approved';
-    saveDB();
-    return [200, { message: 'Withdrawal approved' }];
-  }
-
-  // /admin/withdrawals/:id/reject
-  if (m = pathStr.match(/^\/admin\/withdrawals\/(\d+)\/reject$/)) {
-    const wid = parseInt(m[1]);
-    const wd = DB.withdrawals.find(w => w.id === wid);
-    if (wd) {
-      const wallet = DB.wallets.find(w2 => w2.user_id === wd.user_id);
-      if (wallet) wallet.main_wallet += wd.amount;
-      wd.status = 'rejected';
-      wd.remarks = body.reason || '';
-    }
-    saveDB();
-    return [200, { message: 'Withdrawal rejected, refunded' }];
-  }
-
-  // /admin/banners/:id DELETE
-  if (m = pathStr.match(/^\/admin\/banners\/(\d+)$/) && method === 'DELETE') {
-    const bid = parseInt(m[1]);
-    DB.banners = DB.banners.filter(b => b.id !== bid);
-    saveDB();
-    return [200, { message: 'Banner deleted' }];
-  }
-
-  return [404, { message: 'Route not found' }];
-}
-
-// KYC submit handler (multipart — simplified for local)
-function handleKycSubmit(req, res) {
-  const user = getUser(req);
-  if (!user) { res.writeHead(401); res.end(JSON.stringify({ message: 'Unauthorized' })); return; }
-
-  let rawBody = '';
-  req.on('data', chunk => rawBody += chunk);
-  req.on('end', () => {
-    // For local dev, just mark KYC as submitted
-    const existing = DB.kyc.find(k => k.user_id === user.id);
-    if (existing) {
-      existing.status = 'pending';
-      existing.updated_at = now();
-    } else {
-      DB.kyc.push({ id: DB.nextId.kyc++, user_id: user.id, status: 'pending', created_at: now() });
-    }
-    user.kyc_status = 'pending';
-    saveDB();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ message: 'KYC submitted', status: 'pending' }));
-  });
-}
-
-// ================================================
-// HTTP SERVER
-// ================================================
-const server = http.createServer((req, res) => {
-  const parsed = url.parse(req.url);
+const server = http.createServer(async (req, res) => {
+  const parsed = url.parse(req.url, true);
   const pathname = parsed.pathname;
+  res.setHeader('Access-Control-Allow-Origin','*');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization');
+  if (req.method==='OPTIONS') { res.writeHead(204); res.end(); return; }
+  const json=(s,d)=>{ res.writeHead(s,{'Content-Type':'application/json'}); res.end(JSON.stringify(d)); };
+  const body=()=>new Promise(r=>{let b='';req.on('data',c=>b+=c);req.on('end',()=>{try{r(JSON.parse(b))}catch{r({})}});});
 
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
-  // ---- API ROUTES ----
   if (pathname.startsWith('/api/')) {
-    const apiPath = pathname.replace('/api', '');
-
-    // KYC multipart submit
-    if (apiPath === '/kyc/step1' && req.method === 'POST') {
-      res.setHeader('Content-Type', 'application/json');
-      handleKycSubmit(req, res);
-      return;
-    }
-
-    const key = `${req.method} ${apiPath}`;
-    const handler = API[key];
-
-    if (handler) {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', () => {
-        let parsed = {};
-        try { parsed = JSON.parse(body); } catch {}
-        try {
-          const [status, data] = handler(parsed, req);
-          res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(data));
-        } catch(e) {
-          console.error('API Error:', e.message);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ message: 'Server error: ' + e.message }));
-        }
-      });
-      return;
-    }
-
-    // Dynamic routes (admin with IDs)
-    if (pathname.startsWith('/api/admin/') || pathname.includes('/block') || pathname.includes('/approve') || pathname.includes('/reject')) {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', () => {
-        let parsed = {};
-        try { parsed = JSON.parse(body); } catch {}
-        const [status, data] = handleDynamicAdmin(req.method, apiPath, parsed, req);
-        res.writeHead(status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(data));
-      });
-      return;
-    }
-
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ message: 'API route not found: ' + apiPath }));
-    return;
+    const p=pathname.replace('/api',''), m=req.method;
+    try {
+      if(m==='POST'&&p==='/auth/register'){const b=await body();if(!b.name||!b.email||!b.password)return json(400,{message:'All fields required'});if((await db.query('SELECT id FROM users WHERE email=$1',[b.email.toLowerCase()])).rows.length)return json(400,{message:'Email already registered'});const uid=genUID();const r=await db.query('INSERT INTO users (name,email,mobile,country_code,password,user_id,sponsor_id) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',[b.name,b.email.toLowerCase(),b.mobile||'',b.country_code||'+91',hashPwd(b.password),uid,b.sponsor_id||null]);const u=r.rows[0];await db.query('INSERT INTO wallets (user_id) VALUES ($1)',[u.id]);await db.query('INSERT INTO incomes (user_id) VALUES ($1)',[u.id]);if(b.sponsor_id){const sp=(await db.query('SELECT * FROM users WHERE user_id=$1',[b.sponsor_id])).rows[0];if(sp){const s=await getSettings();const amt=parseFloat(s.entry_amount||167)*parseFloat(s.referral_percent||15)/100;await db.query('UPDATE incomes SET direct_income=direct_income+$1 WHERE user_id=$2',[amt,sp.id]);await db.query('INSERT INTO transactions (user_id,tx_type,type,amount,status,remarks) VALUES ($1,$2,$3,$4,$5,$6)',[sp.id,'referral','credit',amt,'completed',`Referral from ${u.name}`]);}}return json(200,{token:genToken({userId:u.id,email:u.email}),user:strip(u)});}
+      if(m==='POST'&&p==='/auth/login'){const b=await body();const u=(await db.query('SELECT * FROM users WHERE email=$1',[(b.email||'').toLowerCase()])).rows[0];if(!u||u.password!==hashPwd(b.password))return json(401,{message:'Invalid email or password'});if(u.status!==1)return json(403,{message:'Account blocked'});return json(200,{token:genToken({userId:u.id,email:u.email}),user:strip(u)});}
+      if(m==='POST'&&p==='/auth/logout')return json(200,{message:'Logged out'});
+      if(m==='GET'&&p==='/auth/profile'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});return json(200,{user:strip(u)});}
+      if(m==='PUT'&&p==='/auth/profile'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});const b=await body();await db.query('UPDATE users SET name=$1,mobile=$2,eth_address=$3 WHERE id=$4',[b.name||u.name,b.mobile||u.mobile,b.eth_address||u.eth_address,u.id]);return json(200,{message:'Updated'});}
+      if(m==='POST'&&p==='/auth/change-password'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});const b=await body();if(u.password!==hashPwd(b.current_password))return json(400,{message:'Wrong current password'});await db.query('UPDATE users SET password=$1 WHERE id=$2',[hashPwd(b.password),u.id]);return json(200,{message:'Password updated'});}
+      if(m==='POST'&&p==='/auth/forgot-password'){const b=await body();const otp=Math.floor(100000+Math.random()*900000).toString();console.log(`OTP ${b.email}: ${otp}`);return json(200,{message:'OTP sent',debug_otp:otp});}
+      if(m==='POST'&&p==='/auth/verify-otp')return json(200,{verified:true});
+      if(m==='GET'&&p==='/kyc/status'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});const r=(await db.query('SELECT * FROM kyc WHERE user_id=$1',[u.id])).rows[0];return json(200,{status:r?.status||null,rejection_reason:r?.rejection_reason||null});}
+      if(m==='POST'&&p==='/kyc/step1'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});await db.query('INSERT INTO kyc (user_id,status) VALUES ($1,$2) ON CONFLICT (user_id) DO UPDATE SET status=$2,updated_at=NOW()',[u.id,'pending']);await db.query("UPDATE users SET kyc_status='pending' WHERE id=$1",[u.id]);return json(200,{message:'KYC submitted',status:'pending'});}
+      if(m==='GET'&&p==='/dashboard/stats'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});const w=(await db.query('SELECT * FROM wallets WHERE user_id=$1',[u.id])).rows[0]||{main_wallet:0,fund_wallet:0};const inc=(await db.query('SELECT * FROM incomes WHERE user_id=$1',[u.id])).rows[0]||{direct_income:0,pension_income:0};const td=parseInt((await db.query('SELECT COUNT(*) FROM users WHERE sponsor_id=$1',[u.user_id])).rows[0].count);const now=new Date();const md=parseInt((await db.query('SELECT COUNT(*) FROM users WHERE sponsor_id=$1 AND EXTRACT(MONTH FROM created_at)=$2 AND EXTRACT(YEAR FROM created_at)=$3',[u.user_id,now.getMonth()+1,now.getFullYear()])).rows[0].count);const g=(await db.query('SELECT * FROM groups WHERE status=1 LIMIT 1')).rows[0]||{name:'Group A',member_count:0};return json(200,{wallet:w,incomes:inc,total_directs:td,monthly_directs:md,fast_income_count:md,group:g,user:strip(u)});}
+      if(m==='GET'&&p==='/dashboard/team'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});return json(200,{team:(await db.query('SELECT * FROM users WHERE sponsor_id=$1',[u.user_id])).rows.map(strip)});}
+      if(m==='GET'&&p==='/dashboard/transactions'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});const pg=parseInt(parsed.query.page||1);const off=(pg-1)*15;const tot=parseInt((await db.query('SELECT COUNT(*) FROM transactions WHERE user_id=$1',[u.id])).rows[0].count);const data=(await db.query('SELECT * FROM transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 15 OFFSET $2',[u.id,off])).rows;return json(200,paginate(data,tot,pg,15));}
+      if(m==='GET'&&p==='/dashboard/incomes'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});return json(200,{incomes:(await db.query('SELECT * FROM incomes WHERE user_id=$1',[u.id])).rows[0]||{}});}
+      if(m==='GET'&&p==='/investment/plan')return json(200,await getSettings());
+      if(m==='POST'&&p==='/investment/activate'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});const b=await body();if(!b.tx_hash||b.tx_hash.length<10)return json(400,{message:'Invalid hash'});if((await db.query('SELECT id FROM investments WHERE tx_hash=$1',[b.tx_hash])).rows.length)return json(400,{message:'Hash already used'});const s=await getSettings();const amt=parseFloat(s.entry_amount||167);await db.query('INSERT INTO investments (user_id,amount,tx_hash,status) VALUES ($1,$2,$3,0)',[u.id,amt,b.tx_hash]);await db.query('INSERT INTO transactions (user_id,tx_type,type,amount,tx_id,status,remarks) VALUES ($1,$2,$3,$4,$5,$6,$7)',[u.id,'deposit','debit',amt,b.tx_hash,'pending','Investment deposit']);return json(200,{message:'Investment submitted. Pending admin verification.'});}
+      if(m==='GET'&&p==='/investment/history'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});return json(200,(await db.query('SELECT * FROM investments WHERE user_id=$1 ORDER BY created_at DESC',[u.id])).rows);}
+      if(m==='GET'&&p==='/wallet/balance'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});return json(200,(await db.query('SELECT * FROM wallets WHERE user_id=$1',[u.id])).rows[0]||{main_wallet:0,fund_wallet:0});}
+      if(m==='GET'&&p==='/withdrawal/history'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});return json(200,(await db.query('SELECT * FROM withdrawals WHERE user_id=$1 ORDER BY created_at DESC',[u.id])).rows);}
+      if(m==='POST'&&p==='/withdrawal/request'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});const b=await body();const amt=parseFloat(b.amount);const s=await getSettings();if(!amt||amt<parseFloat(s.min_withdrawal||10))return json(400,{message:`Min withdrawal $${s.min_withdrawal}`});const w=(await db.query('SELECT * FROM wallets WHERE user_id=$1',[u.id])).rows[0];if(!w||parseFloat(w.main_wallet)<amt)return json(400,{message:'Insufficient balance'});const fee=amt*0.02;await db.query('UPDATE wallets SET main_wallet=main_wallet-$1 WHERE user_id=$2',[amt,u.id]);await db.query('INSERT INTO withdrawals (user_id,amount,tx_charge,payable,wallet_address,status) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,amt,fee,amt-fee,b.wallet_address,'pending']);await db.query('INSERT INTO transactions (user_id,tx_type,type,amount,status,remarks) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,'withdrawal','debit',amt,'pending','Withdrawal request']);return json(200,{message:'Withdrawal submitted'});}
+      if(m==='GET'&&p==='/referral/directs'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});return json(200,{directs:(await db.query('SELECT * FROM users WHERE sponsor_id=$1',[u.user_id])).rows.map(strip)});}
+      if(m==='POST'&&p==='/referral/claim'){const u=await getUser(req);if(!u)return json(401,{message:'Unauthorized'});const inc=(await db.query('SELECT * FROM incomes WHERE user_id=$1',[u.id])).rows[0];if(!inc||parseFloat(inc.direct_income)<=0)return json(400,{message:'No income to claim'});const amt=parseFloat(inc.direct_income);await db.query('UPDATE wallets SET main_wallet=main_wallet+$1 WHERE user_id=$2',[amt,u.id]);await db.query('UPDATE incomes SET direct_income=0 WHERE user_id=$1',[u.id]);await db.query('INSERT INTO transactions (user_id,tx_type,type,amount,status,remarks) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,'referral_claim','credit',amt,'completed','Referral claim']);return json(200,{message:'Claimed!',amount:amt});}
+      if(m==='POST'&&p==='/admin/login'){const b=await body();const a=(await db.query('SELECT * FROM admins WHERE email=$1',[(b.email||'').toLowerCase()])).rows[0];if(!a||a.password!==hashPwd(b.password))return json(401,{message:'Invalid credentials'});return json(200,{token:genToken({userId:a.id,email:a.email,isAdmin:true}),admin:strip(a)});}
+      if(m==='GET'&&p==='/admin/dashboard'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});const tu=parseInt((await db.query('SELECT COUNT(*) FROM users')).rows[0].count);const au=parseInt((await db.query('SELECT COUNT(*) FROM investments WHERE status=1')).rows[0].count);const nt=parseInt((await db.query("SELECT COUNT(*) FROM users WHERE created_at::date=NOW()::date")).rows[0].count);const pk=parseInt((await db.query("SELECT COUNT(*) FROM kyc WHERE status='pending'")).rows[0].count);const pw=parseInt((await db.query("SELECT COUNT(*) FROM withdrawals WHERE status='pending'")).rows[0].count);const ti=parseFloat((await db.query("SELECT COALESCE(SUM(amount),0) FROM investments WHERE status=1")).rows[0].coalesce);const ru=(await db.query('SELECT * FROM users ORDER BY created_at DESC LIMIT 8')).rows.map(strip);const rt=(await db.query('SELECT * FROM transactions ORDER BY created_at DESC LIMIT 6')).rows;return json(200,{total_users:tu,active_users:au,new_users_today:nt,pending_kyc:pk,pending_withdrawals:pw,total_invested:ti,recent_users:ru,recent_transactions:rt});}
+      if(m==='GET'&&p==='/admin/users'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});const pg=parseInt(parsed.query.page||1);const sr=parsed.query.search||'';const off=(pg-1)*20;let q='SELECT * FROM users',params=[];if(sr){q+=' WHERE name ILIKE $1 OR email ILIKE $1 OR user_id ILIKE $1';params.push(`%${sr}%`);}const data=(await db.query(q+` ORDER BY created_at DESC LIMIT 20 OFFSET ${off}`,params)).rows.map(strip);const tot=parseInt((await db.query('SELECT COUNT(*) FROM users')).rows[0].count);return json(200,paginate(data,tot,pg,20));}
+      if(m==='GET'&&p==='/admin/kyc'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});const st=parsed.query.status||'pending';return json(200,(await db.query('SELECT k.*,u.name,u.email,u.user_id FROM kyc k JOIN users u ON k.user_id=u.id WHERE k.status=$1',[st])).rows);}
+      if(m==='GET'&&p==='/admin/withdrawals'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});const st=parsed.query.status||'pending';return json(200,(await db.query('SELECT w.*,u.name,u.email FROM withdrawals w JOIN users u ON w.user_id=u.id WHERE w.status=$1 ORDER BY w.created_at DESC',[st])).rows);}
+      if(m==='GET'&&p==='/admin/transactions'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});const pg=parseInt(parsed.query.page||1);const off=(pg-1)*20;const tot=parseInt((await db.query('SELECT COUNT(*) FROM transactions')).rows[0].count);const data=(await db.query('SELECT t.*,u.name,u.email FROM transactions t JOIN users u ON t.user_id=u.id ORDER BY t.created_at DESC LIMIT 20 OFFSET $1',[off])).rows;return json(200,paginate(data,tot,pg,20));}
+      if((m==='GET'||m==='PUT')&&p==='/admin/plan'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});if(m==='GET')return json(200,await getSettings());const b=await body();for(const[k,v]of Object.entries(b))await db.query('INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2',[k,v]);return json(200,{message:'Updated'});}
+      if((m==='GET'||m==='PUT')&&p==='/admin/settings'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});if(m==='GET')return json(200,await getSettings());const b=await body();for(const[k,v]of Object.entries(b))await db.query('INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2',[k,v]);return json(200,{message:'Saved'});}
+      if(m==='GET'&&p==='/admin/groups'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});return json(200,(await db.query('SELECT * FROM groups')).rows);}
+      if(m==='GET'&&p==='/admin/banners'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});return json(200,(await db.query('SELECT * FROM banners ORDER BY created_at DESC')).rows);}
+      if(m==='POST'&&p==='/admin/pension/distribute'){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});const s=await getSettings();const pa=parseFloat(s.pension_amount||100);const mr=parseInt(s.min_monthly_referrals||2);const now=new Date();const users=(await db.query('SELECT * FROM users')).rows;let cnt=0;for(const u of users){const md=parseInt((await db.query('SELECT COUNT(*) FROM users WHERE sponsor_id=$1 AND EXTRACT(MONTH FROM created_at)=$2 AND EXTRACT(YEAR FROM created_at)=$3',[u.user_id,now.getMonth()+1,now.getFullYear()])).rows[0].count);if(md>=mr){await db.query('UPDATE wallets SET main_wallet=main_wallet+$1 WHERE user_id=$2',[pa,u.id]);await db.query('UPDATE incomes SET pension_income=pension_income+$1 WHERE user_id=$2',[pa,u.id]);await db.query('INSERT INTO transactions (user_id,tx_type,type,amount,status,remarks) VALUES ($1,$2,$3,$4,$5,$6)',[u.id,'pension','credit',pa,'completed','Monthly pension']);cnt++;}}return json(200,{message:`Pension distributed to ${cnt} users`,count:cnt});}
+      const um=p.match(/^\/admin\/users\/(\d+)(\/block)?$/);if(um){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});const uid=parseInt(um[1]);if(um[2]==='/block'){const u=(await db.query('SELECT status FROM users WHERE id=$1',[uid])).rows[0];const ns=u?.status===1?0:1;await db.query('UPDATE users SET status=$1 WHERE id=$2',[ns,uid]);return json(200,{message:'Updated',status:ns});}if(m==='GET'){const u=(await db.query('SELECT * FROM users WHERE id=$1',[uid])).rows[0];return json(u?200:404,u?strip(u):{message:'Not found'});}if(m==='PUT'){const b=await body();await db.query('UPDATE users SET name=$1,mobile=$2,status=$3 WHERE id=$4',[b.name,b.mobile,b.status,uid]);return json(200,{message:'Updated'});}}
+      const km=p.match(/^\/admin\/kyc\/(\d+)\/(approve|reject)$/);if(km){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});const uid=parseInt(km[1]),act=km[2];if(act==='approve'){await db.query("UPDATE kyc SET status='approved' WHERE user_id=$1",[uid]);await db.query("UPDATE users SET kyc_status='approved',active_status=1 WHERE id=$1",[uid]);}else{const b=await body();await db.query("UPDATE kyc SET status='rejected',rejection_reason=$1 WHERE user_id=$2",[b.reason||'',uid]);await db.query("UPDATE users SET kyc_status='rejected' WHERE id=$1",[uid]);}return json(200,{message:`KYC ${act}d`});}
+      const wm=p.match(/^\/admin\/withdrawals\/(\d+)\/(approve|reject)$/);if(wm){if(!await getAdmin(req))return json(401,{message:'Unauthorized'});const wid=parseInt(wm[1]),act=wm[2];if(act==='approve'){await db.query("UPDATE withdrawals SET status='approved' WHERE id=$1",[wid]);}else{const b=await body();const wd=(await db.query('SELECT * FROM withdrawals WHERE id=$1',[wid])).rows[0];if(wd){await db.query('UPDATE wallets SET main_wallet=main_wallet+$1 WHERE user_id=$2',[wd.amount,wd.user_id]);await db.query("UPDATE withdrawals SET status='rejected',remarks=$1 WHERE id=$2",[b.reason||'',wid]);}}return json(200,{message:`Withdrawal ${act}d`});}
+      return json(404,{message:'Route not found: '+p});
+    } catch(e) { console.error('API Error:',e.message); return json(500,{message:'Server error: '+e.message}); }
   }
 
-  // ---- STATIC FILES ----
-  let filePath = pathname === '/' ? '/index.html' : pathname;
-  const fullPath = path.join(__dirname, filePath);
-
-  // Security: prevent directory traversal
-  if (!fullPath.startsWith(__dirname)) {
-    res.writeHead(403); res.end('Forbidden'); return;
-  }
-
-  fs.readFile(fullPath, (err, data) => {
-    if (err) {
-      // SPA fallback — all unknown routes serve index.html
-      fs.readFile(path.join(__dirname, 'index.html'), (err2, indexData) => {
-        if (err2) { res.writeHead(404); res.end('Not found'); return; }
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(indexData);
-      });
-      return;
-    }
-    const ext = path.extname(fullPath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
-    res.end(data);
+  let filePath=pathname==='/'?'/index.html':pathname;
+  const fullPath=path.join(__dirname,filePath);
+  if(!fullPath.startsWith(__dirname)){res.writeHead(403);res.end('Forbidden');return;}
+  fs.readFile(fullPath,(err,data)=>{
+    if(err){fs.readFile(path.join(__dirname,'index.html'),(e2,d)=>{if(e2){res.writeHead(404);res.end('Not found');return;}res.writeHead(200,{'Content-Type':'text/html'});res.end(d);});return;}
+    res.writeHead(200,{'Content-Type':MIME[path.extname(fullPath)]||'application/octet-stream'});res.end(data);
   });
 });
 
-server.listen(PORT, () => {
-  console.log('\n');
-  console.log('  🪐 TRO Platform — Local Dev Server');
-  console.log('  ====================================');
-  console.log(`  URL:    http://localhost:${PORT}`);
-  console.log(`  Admin:  http://localhost:${PORT}/#admin/login`);
-  console.log('  ');
-  console.log('  Admin Login: admin@gmail.com / admin123');
-  console.log('  Data saved to: .tro-data.json');
-  console.log('  ');
-  console.log('  Press Ctrl+C to stop');
-  console.log('\n');
-});
+server.listen(PORT,()=>console.log(`\n🪐 TRO Live on port ${PORT}\n   Admin: admin@gmail.com / admin123\n`));
