@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>TRO – The Real Orbit | Global Reward Platform</title>
+  <meta name="description" content="TRO – A global reward-based platform for passive income generation. 167 USDT one-time entry. $100 monthly pension. 15% direct referral income.">
+  <meta name="theme-color" content="#0A1628">
+  <meta property="og:title" content="TRO – The Real Orbit">
+  <meta property="og:description" content="Join TRO for passive income through structured participation. Lifetime ID. Monthly pension. Direct referral income.">
+  <meta property="og:type" content="website">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet">
+
+  <!-- Global Styles -->
+  <link rel="stylesheet" href="src/styles/global.css">
+
+  <!-- Initial loader style -->
+  <style>
+    #initial-loader {
+      position: fixed; inset: 0;
+      background: #060D1A;
+      z-index: 99999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      transition: opacity 0.5s ease;
+    }
+    #initial-loader .logo {
+      font-family: 'Syne', sans-serif;
+      font-size: 2.5rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #FFD166, #00D4FF);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    #initial-loader .orbit-ring {
+      width: 60px; height: 60px;
+      border: 3px solid rgba(255,209,102,0.2);
+      border-top-color: #FFD166;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #initial-loader p {
+      color: #4A5568;
+      font-size: 0.85rem;
+      font-family: 'DM Sans', sans-serif;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Initial Page Loader -->
+  <div id="initial-loader">
+    <div class="logo">🪐 TRO</div>
+    <div class="orbit-ring"></div>
+    <p>The Real Orbit — Loading…</p>
+  </div>
+
+  <!-- App Root -->
+  <div id="app"></div>
+
+  <!-- Toast Container -->
+  <div id="toast-container"></div>
+
+  <!-- App Config (override in production) -->
+  <script>
+    window.TRO_CONFIG = {
+      apiBase: '/api',       // For shared hosting
+      useFirebase: false,     // Set true + add Firebase scripts below for Firebase mode
+      version: '1.0.0',
+    };
+  </script>
+
+  <!-- Main App (ES Module) -->
+  <script type="module" src="src/main.js"></script>
+
+  <!-- Remove loader once page starts loading -->
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      setTimeout(function() {
+        const loader = document.getElementById('initial-loader');
+        if (loader) {
+          loader.style.opacity = '0';
+          setTimeout(() => loader.remove(), 500);
+        }
+      }, 800);
+    });
+  </script>
+
+</body>
+</html>
